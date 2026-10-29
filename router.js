@@ -13,6 +13,8 @@ export const WALK_SPEED = 5 / 3.6; // m/s, ~5 km/h
 export const WALK_DETOUR = 1.2;    // streets are longer than the straight line
 export const WALK_MAX_M = 1000;    // straight-line limit for first/last walk
 const MAX_RIDES = 5;
+// As few changes as possible: an extra change must save at least this much time.
+export const CHANGE_PENALTY = 10 * 60;
 const INF = 0x7fffffff;
 
 // ---------- loading ----------
@@ -54,7 +56,8 @@ function index(tt) {
   for (let t = 0; t < nTrips; t++) {
     const row = tt.tripRow[t], p = tt.tripPattern[t];
     const len = tt.patStopStart[p + 1] - tt.patStopStart[p];
-    let time = tt.tripFirstDep[t];
+    // tripFirstDep is the departure from the first stop; its arrival is earlier by the dwell.
+    let time = tt.tripFirstDep[t] - tt.tripDeltas[2 * row + 1];
     for (let i = 0; i < len; i++) {
       if (i > 0) time += tt.tripDeltas[2 * (row + i)];
       tt.schedArr[row + i] = time;
@@ -100,6 +103,8 @@ function index(tt) {
     egress: new Int32Array(nStops),
     marked: new Uint8Array(nStops),
     patQ: new Int32Array(nPat),
+    forbid: new Int32Array(nStops), // stamp: stops the previous vehicle still reaches
+    stamp: 0,
   };
   return tt;
 }
@@ -214,10 +219,27 @@ function earliestTrip(tt, p, i, time, excludeTrip) {
 
 // sources: [{ stop, time }] where you can board (walk from start included).
 // targets: [{ stop, secs }] walk from stop to the destination.
+// prevLeg: { trip, toPos } you just got off, when the sources are a change point.
 // Returns the best journey for each number of rides, fastest last:
 // [{ arrival, rides, legs: [{ trip, fromPos, toPos }], lastStop }]
-export function raptor(tt, sources, targets, { maxRides = MAX_RIDES, horizon = INF, excludeTrip = -1, excludeRouteFirst = -1 } = {}) {
-  const { board, ride, parTrip, parBoardPos, parAlightPos, parFoot, bestRide, egress, marked, patQ } = tt.ws;
+//
+// A change is not allowed if the vehicle you got off still goes to the stop
+// where the next one drops you (or within 0-min change distance of it): you
+// would just be hopping onto a vehicle ahead of yours on the same way.
+export function raptor(tt, sources, targets, { maxRides = MAX_RIDES, horizon = INF, excludeTrip = -1, excludeRouteFirst = -1, prevLeg = null } = {}) {
+  const ws = tt.ws;
+  const { board, ride, parTrip, parBoardPos, parAlightPos, parFoot, bestRide, egress, marked, patQ, forbid } = ws;
+  // Stamp the stops trip T still serves after position ap, plus their 0-min neighbours.
+  const stampAfter = (T, ap) => {
+    const id = ++ws.stamp;
+    const pp = tt.tripPattern[T], pps = tt.patStopStart[pp], plen = tt.patStopStart[pp + 1] - pps;
+    for (let j = ap + 1; j < plen; j++) {
+      const y = tt.patStops[pps + j];
+      forbid[y] = id;
+      for (let f = tt.footStart[y]; f < tt.footStart[y + 1]; f++) forbid[tt.footStops[f]] = id;
+    }
+    return id;
+  };
   const n = tt.nStops;
   board.fill(INF, 0, (maxRides + 1) * n);
   ride.fill(INF, 0, (maxRides + 1) * n);
@@ -250,10 +272,10 @@ export function raptor(tt, sources, targets, { maxRides = MAX_RIDES, horizon = I
       patQ[p] = 0;
       if (k === 1 && tt.patRoute[p] === excludeRouteFirst) continue;
       const ps = tt.patStopStart[p], len = tt.patStopStart[p + 1] - ps;
-      let t = -1, row = 0, boardPos = -1;
+      let t = -1, row = 0, boardPos = -1, stamp = 0;
       for (let i = startPos; i < len; i++) {
         const s = tt.patStops[ps + i], flags = tt.patFlags[ps + i];
-        if (t >= 0 && !(flags & 2) && !tt.skipped[row + i]) {
+        if (t >= 0 && !(flags & 2) && !tt.skipped[row + i] && (stamp === 0 || forbid[s] !== stamp)) {
           const a = tt.arr[row + i];
           if (a < bestRide[s] && a < bestDest) {
             if (ride[cur + s] === INF) improved.push(s);
@@ -265,7 +287,13 @@ export function raptor(tt, sources, targets, { maxRides = MAX_RIDES, horizon = I
         if (b !== INF && !(flags & 1) && (t < 0 || b <= tt.dep[row + i])) {
           const nt = earliestTrip(tt, p, i, b, excludeTrip);
           if (nt >= 0 && (t < 0 || tt.dep[tt.tripRow[nt] + i] < tt.dep[row + i] || nt === t)) {
-            if (nt !== t) { t = nt; row = tt.tripRow[t]; boardPos = i; }
+            if (nt !== t) {
+              t = nt; row = tt.tripRow[t]; boardPos = i;
+              // The vehicle you came with, if any.
+              let T = -1, ap = 0;
+              if (k > 1) { const a = parFoot[prev + s]; T = parTrip[prev + a]; ap = parAlightPos[prev + a]; } else if (prevLeg) { T = prevLeg.trip; ap = prevLeg.toPos; }
+              stamp = T >= 0 ? stampAfter(T, ap) : 0;
+            }
           }
         }
       }
@@ -316,6 +344,19 @@ function legsOf(tt, k, stop) {
 }
 
 // ---------- journeys ----------
+
+// Arrival with each change counted as CHANGE_PENALTY extra.
+const cost = (arrive, changes) => arrive + changes * CHANGE_PENALTY;
+const fewestChanges = (res) => res.reduce((a, b) => (cost(b.arrival, b.rides) < cost(a.arrival, a.rides) ? b : a));
+
+// Option o makes option j pointless: o starts no earlier, has no more changes,
+// and arrives no later (each change o saves counts as CHANGE_PENALTY).
+function beats(oStart, o, jStart, j) {
+  if (o.changes > j.changes || oStart < jStart) return false;
+  const slack = (j.changes - o.changes) * CHANGE_PENALTY;
+  if (o.arrive > j.arrive + slack) return false;
+  return oStart > jStart || o.arrive < j.arrive + slack || o.changes < j.changes;
+}
 
 const legStop = (tt, leg, pos) => tt.patStops[tt.patStopStart[tt.tripPattern[leg.trip]] + pos];
 
@@ -376,24 +417,22 @@ export function planner(tt, from, to) {
     for (let tries = 0; tries < 8 && found.length < 4; tries++) {
       const res = raptor(tt, srcStops.map((stop) => ({ stop, time: t })), targets, {
         maxRides: MAX_RIDES - 1, horizon: a1 + 4 * 3600, excludeTrip: first.trip, excludeRouteFirst: first.route,
+        prevLeg: { trip: first.trip, toPos: first.toPos },
       });
       if (!res.length) break;
-      const best = res[res.length - 1];
+      const best = fewestChanges(res);
       const j = describe(tt, [...firstLeg, ...best.legs], startWalk, endWalks);
       found.push(j);
       t = j.legs[1].dep + 1;
     }
-    // Keep only continuations not beaten by a later one (leaves later, arrives no later).
-    const pareto = found.filter((j, i) => !found.some((o, k) => k !== i &&
-      o.legs[1].dep >= j.legs[1].dep && o.arrive <= j.arrive && (o.legs[1].dep > j.legs[1].dep || k < i)));
+    // Keep only continuations no later one beats.
+    const pareto = found.filter((j) => !found.some((o) => o !== j && beats(o.legs[1].dep, o, j.legs[1].dep, j)));
     return pareto.slice(0, 3).map((j) => ({ ...j, wait: j.legs[1].dep - a1 }));
   }
 
-  // Pointless departure: a later one gets there as early without more changes.
+  // Pointless departure: a later one gets there as early (allowing for changes saved).
   function dominated(g, all) {
-    for (const o of all.values()) {
-      if (o !== g && o.leave > g.leave && o.main.arrive <= g.main.arrive && o.main.changes <= g.main.changes) return true;
-    }
+    for (const o of all.values()) if (o !== g && beats(o.leave, o.main, g.leave, g.main)) return true;
     return false;
   }
 
@@ -415,7 +454,7 @@ export function planner(tt, from, to) {
           const key = j.legs[0].trip;
           if (seen.has(key)) continue;
           const old = byTrip.get(key);
-          if (!old || j.leave > old.leave || (j.leave === old.leave && j.arrive < old.main.arrive)) {
+          if (!old || j.leave > old.leave || (j.leave === old.leave && cost(j.arrive, j.changes) < cost(old.main.arrive, old.main.changes))) {
             byTrip.set(key, { key, leave: j.leave, main: j });
           }
         }
