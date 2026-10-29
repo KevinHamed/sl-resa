@@ -101,8 +101,19 @@
   .rt-late { color: var(--late); }
   .old { text-decoration: line-through; color: var(--muted); font-weight: 400; font-size: .8em; }
 
-  .detail { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; display: none; }
-  .trip.open .detail { display: block; }
+  .opts { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
+  .opts-head { color: var(--muted); font-size: 13px; margin: 2px 0 4px; }
+  .opt { display: grid; grid-template-columns: 56px 1fr auto; gap: 8px; align-items: center; width: 100%; border: 0; background: transparent; text-align: left; padding: 7px 4px; border-radius: 8px; cursor: pointer; }
+  .opt + .opt { border-top: 1px solid var(--line); }
+  .opt[aria-expanded="true"] { background: var(--chip); }
+  .opt .wait { font-weight: 700; font-variant-numeric: tabular-nums; font-size: 15px; }
+  .opt .wait.tight { color: var(--late); }
+  .opt .arr { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }
+  .opt .arr small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+  .opt .legs { margin-top: 0; }
+  .too-late { color: var(--late); font-size: 12px; font-weight: 400; }
+  .detail { margin-top: 6px; padding: 4px 4px 8px; display: none; }
+  .detail.open { display: block; }
   .step { display: grid; grid-template-columns: 52px 1fr; gap: 8px; padding: 6px 0; font-size: 14px; }
   .step .t { font-variant-numeric: tabular-nums; font-weight: 600; }
   .step .what { color: var(--muted); }
@@ -144,22 +155,27 @@
 
   <div class="recent" id="recent"></div>
   <div id="out"></div>
-  <p class="foot">Data: SL Journey-planner v2 (Trafiklab). Realtid när den finns.</p>
+  <p class="foot">Egen reseplanerare på SL:s tidtabell (GTFS Regional, Trafiklab) med realtid.<br>Byten mellan hållplatser inom 300 m räknas som 0 min. Gång till/från hållplats: 5 km/h, max 1 km.<br><span id="feed"></span></p>
 </main>
 
-<script>
+<script type="module">
+import { parseDay, planner, applyRealtime } from './router.js';
+import { fetchTripUpdates } from './realtime.js';
+
+// Place search still uses SL's open stop-finder (no key needed).
 const API = 'https://journeyplanner.integration.sl.se/v2';
 const TZ = 'Europe/Stockholm';
 const MIN = 60 * 1000;
 // stops + streets + addresses + POIs (bitmask for any_obj_filter_sf)
 const PLACE_FILTER = 2 | 4 | 8 | 32;
-const MAX_PAGES = 4;
-const TARGET_TRIPS = 8;
+const GROUPS_PER_PAGE = 6;
+// Realtime only matters for trips in the near future.
+const REALTIME_WINDOW = 3 * 3600 * 1000;
 
 const $ = (id) => document.getElementById(id);
 const state = { mode: 'now', from: null, to: null };
 
-// ---------- time helpers (all API times are Stockholm local) ----------
+// ---------- time helpers (timetable times are Stockholm local) ----------
 
 const partsFmt = new Intl.DateTimeFormat('sv-SE', {
   timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
@@ -168,10 +184,6 @@ const partsFmt = new Intl.DateTimeFormat('sv-SE', {
 function stockholmParts(epoch) {
   const p = Object.fromEntries(partsFmt.formatToParts(new Date(epoch)).map((x) => [x.type, x.value]));
   return { y: p.year, mo: p.month, d: p.day, h: p.hour, mi: p.minute };
-}
-function apiDateTime(epoch) {
-  const p = stockholmParts(epoch);
-  return { date: `${p.y}${p.mo}${p.d}`, time: `${p.h}${p.mi}` };
 }
 function inputValue(epoch) {
   const p = stockholmParts(epoch);
@@ -200,7 +212,7 @@ function dayLabel(epoch, ref = Date.now()) {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' }).format(epoch) + ' ';
 }
 
-// ---------- API ----------
+// ---------- places ----------
 
 async function getJSON(path, params) {
   const url = `${API}/${path}?${new URLSearchParams(params)}`;
@@ -213,82 +225,14 @@ async function getJSON(path, params) {
 async function findPlaces(text) {
   const data = await getJSON('stop-finder', { name_sf: text, any_obj_filter_sf: PLACE_FILTER, type_sf: 'any' });
   return (data.locations || [])
+    .filter((l) => Array.isArray(l.coord))
     .sort((a, b) => (b.matchQuality || 0) - (a.matchQuality || 0))
-    .map((l) => ({ id: l.id, name: l.disassembledName && l.type === 'stop' ? l.disassembledName : l.name, full: l.name, type: l.type }));
+    .map((l) => ({ id: l.id, name: l.disassembledName && l.type === 'stop' ? l.disassembledName : l.name, full: l.name, type: l.type, coord: l.coord }));
 }
-
-function placeParams(prefix, place) {
-  if (place.coord) {
-    return { [`type_${prefix}`]: 'coord', [`name_${prefix}`]: `${place.coord[1].toFixed(6)}:${place.coord[0].toFixed(6)}:WGS84[dd.ddddd]` };
-  }
-  return { [`type_${prefix}`]: 'any', [`name_${prefix}`]: place.id };
-}
-
-async function fetchTrips(from, to, epoch, mode) {
-  const { date, time } = apiDateTime(epoch);
-  const data = await getJSON('trips', {
-    ...placeParams('origin', from), ...placeParams('destination', to),
-    itd_date: date, itd_time: time, itd_trip_date_time_dep_arr: mode,
-    calc_number_of_trips: 3, // API maximum
-  });
-  return (data.journeys || []).map(normalizeTrip).filter(Boolean);
-}
-
-// ---------- trip normalisation ----------
-
-const WALK_CLASSES = new Set([99, 100]); // 99 = transfer footpath, 100 = walk
-function legTime(point, kind) {
-  const est = point[`${kind}TimeEstimated`], plan = point[`${kind}TimePlanned`];
-  return { at: Date.parse(est || plan), planned: Date.parse(plan) };
-}
-function placeName(p) {
-  if (p.type === 'platform' && p.parent?.disassembledName) return p.parent.disassembledName;
-  if (p.type === 'stop' && p.disassembledName) return p.disassembledName;
-  return p.name;
-}
-function normalizeTrip(j) {
-  if (!j.legs?.length) return null;
-  const legs = j.legs.map((l) => {
-    const t = l.transportation || {};
-    const dep = legTime(l.origin, 'departure');
-    const arr = legTime(l.destination, 'arrival');
-    const cls = t.product?.class;
-    return {
-      dep, arr, cls,
-      walk: WALK_CLASSES.has(cls),
-      transfer: cls === 99,
-      product: t.product?.name || '',
-      line: t.disassembledName || t.number || '',
-      towards: t.destination?.name || '',
-      from: placeName(l.origin),
-      to: placeName(l.destination),
-      platform: l.origin.properties?.platformName || '',
-      distance: l.distance,
-      cancelled: Boolean(l.isCancelled || l.realtimeStatus?.includes?.('TRIP_CANCELLED')),
-      infos: (l.infos || [])
-        .filter((i) => i.priority && i.priority !== 'veryLow' && i.priority !== 'low')
-        .flatMap((i) => (i.infoLinks || []).map((x) => x.title || x.subtitle).filter(Boolean)),
-    };
-  });
-  const dep = legs[0].dep.at, arr = legs[legs.length - 1].arr.at;
-  const rides = legs.filter((l) => !l.walk);
-  const key = legs.map((l) => `${l.line}|${l.dep.planned}|${l.arr.planned}`).join('/');
-  return { legs, rides, dep, arr, dur: arr - dep, key, cancelled: legs.some((l) => l.cancelled), changes: Math.max(0, rides.length - 1) };
-}
-
-// Drop trips that another trip beats on both ends: leaves no earlier
-// and arrives no later. What remains are the time-efficient options.
-function paretoFilter(trips) {
-  return trips.filter((a) => !trips.some((b) => b !== a &&
-    b.dep >= a.dep && b.arr <= a.arr && (b.dep > a.dep || b.arr < a.arr ||
-    (b.changes < a.changes) || (b.changes === a.changes && b.key < a.key))));
-}
-
-// ---------- search ----------
 
 async function resolvePlace(input, current) {
   const text = input.value.trim();
-  if (current && current.label === text) return current;
+  if (current && current.label === text && current.coord) return current;
   if (!text) return null;
   const [best] = await findPlaces(text);
   if (!best) throw new Error(`Hittade ingen plats för "${text}"`);
@@ -296,37 +240,34 @@ async function resolvePlace(input, current) {
   return { ...best, label: best.name };
 }
 
+// ---------- timetable ----------
+
+// One file per service day, built nightly from SL's GTFS feed (tools/build-data.mjs).
+const days = new Map(); // ymd -> Promise<timetable>
+async function loadDay(ymd) {
+  if (!days.has(ymd)) {
+    const p = (async () => {
+      const res = await fetch(`data/${ymd}.bin.gz`);
+      if (!res.ok) throw new Error(`Ingen tidtabell för ${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6)}.`);
+      let buf = new Uint8Array(await res.arrayBuffer());
+      // Servers may already have undone the gzip; check the magic bytes.
+      if (buf[0] === 0x1f && buf[1] === 0x8b) {
+        buf = new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+      }
+      return parseDay(buf.buffer);
+    })();
+    p.catch(() => days.delete(ymd));
+    days.set(ymd, p);
+  }
+  return days.get(ymd);
+}
+const ymdOf = (epoch) => { const p = stockholmParts(epoch); return `${p.y}${p.mo}${p.d}`; };
+const midnightOf = (ymd) => fromInputValue(`${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6)}T00:00`);
+
+// ---------- search ----------
+
 // The current result list; scrolling to its end loads later departures.
 let session = null;
-
-// The API returns at most 3 trips per call, so page forward (or backward
-// for "arrive by") until `wanted` new usable trips have arrived.
-async function loadPages(s, wanted) {
-  let added = 0;
-  for (let page = 0; page < MAX_PAGES && added < wanted; page++) {
-    const batch = await fetchTrips(s.from, s.to, s.cursor, s.mode);
-    let fresh = 0;
-    batch.forEach((t) => {
-      if (s.all.has(t.key)) return;
-      s.all.set(t.key, t);
-      fresh++;
-      if (fits(t, s.mode, s.target)) added++;
-    });
-    const next = s.mode === 'dep'
-      ? Math.max(...batch.map((t) => t.dep)) + MIN
-      : Math.min(...batch.map((t) => t.arr)) - MIN;
-    if (!fresh || (s.mode === 'dep' ? next <= s.cursor : next >= s.cursor)) {
-      s.done = true;
-      break;
-    }
-    s.cursor = next;
-  }
-}
-
-function visibleTrips(s) {
-  return paretoFilter([...s.all.values()].filter((t) => fits(t, s.mode, s.target) && !t.cancelled))
-    .sort((a, b) => a.dep - b.dep || a.arr - b.arr);
-}
 
 async function search() {
   const out = $('out');
@@ -341,144 +282,199 @@ async function search() {
 
     const mode = state.mode === 'arr' ? 'arr' : 'dep';
     const target = state.mode === 'now' ? Date.now() : fromInputValue($('datetime').value);
-    const s = { from: state.from, to: state.to, mode, target, cursor: target, all: new Map(), shown: new Set(), done: false, loading: false };
-    await loadPages(s, TARGET_TRIPS);
-    // "Arrive by" has a hard end, so only departure searches keep loading.
-    if (mode === 'arr') s.done = true;
+    const ymd = ymdOf(target);
+    const tt = await loadDay(ymd);
+    const midnight = midnightOf(ymd);
+
+    let rtNote = '';
+    const nearNow = target > Date.now() - REALTIME_WINDOW && target < Date.now() + REALTIME_WINDOW;
+    if (nearNow) {
+      try {
+        const { updates } = await fetchTripUpdates();
+        applyRealtime(tt, updates, midnight / 1000);
+      } catch {
+        applyRealtime(tt, [], midnight / 1000);
+        rtNote = 'Realtid kunde inte hämtas, visar tidtabell.';
+      }
+    } else applyRealtime(tt, [], midnight / 1000);
+
+    const p = planner(tt, { lat: state.from.coord[0], lon: state.from.coord[1] }, { lat: state.to.coord[0], lon: state.to.coord[1] });
+    const toSec = (epoch) => Math.round((epoch - midnight) / 1000);
+    const s = { from: state.from, to: state.to, mode, target, midnight, planner: p, groups: [], done: false, loading: false, rtNote };
+
+    if (mode === 'dep') {
+      s.groups = p.next(toSec(target), GROUPS_PER_PAGE);
+      if (!s.groups.length) s.done = true;
+    } else {
+      // Arrive by: sweep departures before the deadline, keep the last ones that make it.
+      const deadline = toSec(target);
+      let groups = [];
+      for (const back of [90, 180, 360]) {
+        const q = planner(tt, { lat: state.from.coord[0], lon: state.from.coord[1] }, { lat: state.to.coord[0], lon: state.to.coord[1] });
+        groups = [];
+        for (let i = 0; i < 6; i++) {
+          const batch = q.next(deadline - back * 60, 8, back * 60);
+          if (!batch.length) break;
+          groups.push(...batch);
+          if (batch.some((g) => g.main.arrive > deadline)) break;
+        }
+        groups = groups.filter((g) => g.main.arrive <= deadline);
+        groups.sort((a, b) => a.leave - b.leave || a.main.arrive - b.main.arrive);
+        if (groups.length) break;
+      }
+      s.groups = groups.slice(-GROUPS_PER_PAGE);
+      s.done = true;
+    }
     session = s;
     render(s);
     saveRecent(state.from, state.to);
   } catch (err) {
+    console.error(err);
     out.innerHTML = `<p class="status error">${esc(err.message || 'Något gick fel')}</p>`;
   } finally {
     go.disabled = false;
   }
 }
 
-async function loadMore() {
+function loadMore() {
   const s = session;
   if (!s || s.done || s.loading) return;
   s.loading = true;
   $('sentinel').textContent = 'Hämtar senare avgångar…';
-  try {
-    await loadPages(s, TARGET_TRIPS);
-  } catch {
-    s.done = true; // stop retrying on errors; a new search starts over
-  }
-  s.loading = false;
-  if (session !== s) return;
-  appendTrips(s);
-}
-
-function fits(t, mode, target) {
-  // Small grace for "depart": the planner may start the first walk a little early.
-  return mode === 'dep' ? t.dep >= target - MIN : t.arr <= target;
+  // Let the message paint before the (synchronous) search runs.
+  setTimeout(() => {
+    let fresh = [];
+    try { fresh = s.planner.next(0, GROUPS_PER_PAGE); } catch { /* fall through */ }
+    s.loading = false;
+    if (!fresh.length) s.done = true;
+    if (session !== s) return;
+    s.groups.push(...fresh);
+    appendGroups(s, fresh);
+  }, 0);
 }
 
 // ---------- rendering ----------
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// GTFS route_type -> the product classes the colours below were written for.
+const CLS = { 401: 2, 100: 0, 900: 4, 700: 5, 1000: 9 };
+const PRODUCT = { 2: 'Tunnelbana', 0: 'Pendeltåg', 4: 'Spårväg', 5: 'Buss', 9: 'Båt' };
+const cls = (leg) => CLS[leg.type] ?? 5;
+function product(leg) {
+  const c = cls(leg);
+  if (c === 4 && leg.desc) return leg.desc;
+  return PRODUCT[c] || 'Linje';
+}
+
 function lineColor(leg) {
   const n = parseInt(leg.line, 10);
-  switch (leg.cls) {
+  switch (cls(leg)) {
     case 2: // tunnelbana
       if ([10, 11].includes(n)) return '#0089ca';
       if ([13, 14].includes(n)) return '#d71d24';
       return '#179c4b';
-    case 0: case 1: return '#ec619f'; // pendeltåg / tåg
+    case 0: return '#ec619f'; // pendeltåg
     case 4: // spårväg & lokalbanor
       if ([25, 26].includes(n)) return '#21b6ba';
       if ([27, 28, 29].includes(n)) return '#a86dae';
       if ([30, 31].includes(n)) return '#d77d00';
       if (n === 21) return '#b65f1f';
       return '#778da7';
-    case 5: case 7: // buss
-      return (n >= 1 && n <= 6) || (n >= 172 && n <= 179) ? '#0089ca' : '#d71d24';
+    case 5: // buss
+      return leg.desc === 'blåbuss' ? '#0089ca' : '#d71d24';
     case 9: return '#00a7b5'; // båt
     default: return '#5b6570';
   }
 }
-const icon = (cls) => ({ 0: '🚆', 1: '🚆', 2: 'T', 4: '🚊', 5: '🚌', 7: '🚌', 9: '⛴' }[cls] || '•');
+const icon = (leg) => ({ 0: '🚆', 2: 'T', 4: '🚊', 5: '🚌', 9: '⛴' }[cls(leg)] || '•');
 
-function timeHtml(t) {
-  const late = Math.round((t.at - t.planned) / MIN);
-  if (Math.abs(late) < 1) return hm(t.at);
-  return `<span class="rt-late">${hm(t.at)}</span> <span class="old">${hm(t.planned)}</span>`;
+// Seconds after the service day's midnight -> epoch ms.
+const at = (s, secs) => s.midnight + secs * 1000;
+
+function timeHtml(s, secs, sched, rt) {
+  const late = Math.round((secs - sched) / 60);
+  const live = rt ? ' title="Realtid"' : '';
+  if (Math.abs(late) < 1) return `<span${live}>${hm(at(s, secs))}</span>`;
+  return `<span class="rt-late"${live}>${hm(at(s, secs))}</span> <span class="old">${hm(at(s, sched))}</span>`;
 }
+const chip = (leg) => `<span class="line" style="background:${lineColor(leg)}">${icon(leg)} ${esc(leg.line)}</span>`;
+const chipsHtml = (legs) => legs.map(chip).join('<span class="arrow">›</span>');
+const walkMin = (w) => Math.max(1, Math.round(w.secs / 60));
+const changesText = (n) => (n === 0 ? 'Inga byten' : n === 1 ? '1 byte' : `${n} byten`);
 
-function chipsHtml(trip) {
-  const parts = [];
-  trip.legs.forEach((l, i) => {
-    if (l.walk) {
-      const mins = Math.round((l.arr.at - l.dep.at) / MIN);
-      if (!l.transfer && mins > 0) parts.push(`<span class="walk">🚶${mins}</span>`);
-      return;
+function detailHtml(s, j) {
+  const steps = [];
+  const first = j.legs[0], last = j.legs[j.legs.length - 1];
+  if (j.walkIn.m > 0) {
+    steps.push(`<div class="step"><div class="t">${hm(at(s, j.leave))}</div><div><b>Gå</b> till ${esc(first.fromName)} <span class="what">· ${walkMin(j.walkIn)} min (${j.walkIn.m} m)</span></div></div>`);
+  }
+  j.legs.forEach((l, i) => {
+    if (i > 0) {
+      const prev = j.legs[i - 1];
+      const wait = Math.round((l.dep - prev.arr) / 60);
+      const where = prev.toName === l.fromName ? esc(l.fromName) : `${esc(prev.toName)} → ${esc(l.fromName)}`;
+      steps.push(`<div class="step"><div class="t"></div><div class="what">Byte vid ${where} · väntetid ${wait} min</div></div>`);
     }
-    parts.push(`<span class="line" style="background:${lineColor(l)}">${icon(l.cls)} ${esc(l.line)}</span>`);
+    const plat = l.fromPlatform ? ` · läge ${esc(l.fromPlatform)}` : '';
+    const mins = Math.max(1, Math.round((l.arr - l.dep) / 60));
+    steps.push(`<div class="step"><div class="t">${timeHtml(s, l.dep, l.schedDep, l.depRt)}</div><div>
+        <b>${esc(product(l))} ${esc(l.line)}</b> mot ${esc(l.headsign)}
+        <div class="what">${esc(l.fromName)}${plat} → ${esc(l.toName)} (${timeHtml(s, l.arr, l.schedArr, l.arrRt)}) · ${mins} min, ${l.stops} hpl</div>
+      </div></div>`);
   });
-  return parts.join('<span class="arrow">›</span>');
+  if (j.walkOut.m > 0) {
+    steps.push(`<div class="step"><div class="t">${hm(at(s, last.arr))}</div><div><b>Gå</b> från ${esc(last.toName)} till målet <span class="what">· ${walkMin(j.walkOut)} min (${j.walkOut.m} m)</span></div></div>`);
+  }
+  steps.push(`<div class="step"><div class="t">${hm(at(s, j.arrive))}</div><div><b>Framme</b></div></div>`);
+  return steps.join('');
 }
 
-function detailHtml(trip) {
-  return trip.legs.map((l) => {
-    const mins = Math.max(1, Math.round((l.arr.at - l.dep.at) / MIN));
-    if (l.walk) {
-      if (l.transfer) return `<div class="step"><div class="t"></div><div class="what">Byte i ${esc(l.from)} · ${mins} min</div></div>`;
-      const dist = l.distance ? ` (${l.distance} m)` : '';
-      return `<div class="step"><div class="t">${hm(l.dep.at)}</div><div><b>Gå</b> till ${esc(l.to)} <span class="what">· ${mins} min${dist}</span></div></div>`;
-    }
-    const plat = l.platform ? ` · läge ${esc(l.platform)}` : '';
-    const infos = l.infos.map((x) => `<div class="info">⚠ ${esc(x)}</div>`).join('');
-    return `<div class="step"><div class="t">${timeHtml(l.dep)}</div><div>
-        <b>${esc(l.product)} ${esc(l.line)}</b> mot ${esc(l.towards)}
-        <div class="what">${esc(l.from)}${plat} → ${esc(l.to)} (${timeHtml(l.arr)}) · ${mins} min</div>${infos}
-      </div></div>`;
-  }).join('');
-}
-
-function tripHtml(trip, target) {
-  const firstRide = trip.rides[0];
-  const board = firstRide ? `${firstRide.product} ${firstRide.line} från ${firstRide.from} ${hm(firstRide.dep.at)}` : 'Gå hela vägen';
-  const changes = trip.changes === 0 ? 'Inga byten' : trip.changes === 1 ? '1 byte' : `${trip.changes} byten`;
-  const warn = trip.legs.some((l) => l.infos.length) ? ' · ⚠ störning' : '';
-  return `<article class="trip">
-    <div class="top">
-      <span class="times">${dayLabel(trip.dep, target)}${timeHtml(trip.legs[0].dep)} – ${timeHtml(trip.legs[trip.legs.length - 1].arr)}</span>
-      <span class="dur">${fmtDur(trip.dur)}</span>
+function groupHtml(s, g, gi) {
+  const m = g.main, first = m.legs[0];
+  const walk = m.walkIn.m > 0 ? `Gå ${walkMin(m.walkIn)} min · ` : '';
+  const head = `<div class="top">
+      <span class="times">${dayLabel(at(s, g.leave), s.target)}${timeHtml(s, first.dep, first.schedDep, first.depRt)}</span>
+      <span class="dur">${chip(first)}</span>
     </div>
-    <div class="meta">${esc(board)} · ${changes}${warn}</div>
-    <div class="legs">${chipsHtml(trip)}</div>
-    <div class="detail">${detailHtml(trip)}</div>
-  </article>`;
+    <div class="meta">${walk}${esc(product(first))} ${esc(first.line)} mot ${esc(first.headsign)} från ${esc(first.fromName)}${first.fromPlatform ? ` (läge ${esc(first.fromPlatform)})` : ''}</div>`;
+
+  const deadline = s.mode === 'arr' ? Math.round((s.target - s.midnight) / 1000) : Infinity;
+  const late = (o) => (o.arrive > deadline ? ' <span class="too-late">för sent</span>' : '');
+  const rows = g.options.map((o, oi) => {
+    const rest = o.wait === null ? o.legs : o.legs.slice(1);
+    const wait = o.wait === null ? '' : `<span class="wait${o.wait < 120 ? ' tight' : ''}">${Math.round(o.wait / 60)} min</span>`;
+    return `<button type="button" class="opt" data-g="${gi}" data-o="${oi}" aria-expanded="false">
+        ${o.wait === null ? '<span class="wait">Direkt</span>' : wait}
+        <span class="legs">${chipsHtml(rest)}</span>
+        <span class="arr">${hm(at(s, o.arrive))}${late(o)}<small>${fmtDur((o.arrive - g.leave) * 1000)} · ${changesText(o.changes)}</small></span>
+      </button><div class="detail" id="d-${gi}-${oi}">${detailHtml(s, o)}</div>`;
+  }).join('');
+  const where = m.legs.length > 1
+    ? `<div class="opts-head">Framme vid ${esc(first.toName)} ${timeHtml(s, first.arr, first.schedArr, first.arrRt)} · byte (väntetid):</div>`
+    : '';
+  return `<article class="trip">${head}<div class="opts">${where}${rows}</div></article>`;
 }
 
 function render(s) {
   const out = $('out');
-  const trips = visibleTrips(s);
-  if (!trips.length) {
+  if (!s.groups.length) {
     out.innerHTML = '<p class="status">Inga resor hittades för den tiden.</p>';
     return;
   }
-  const { mode, target } = s;
-  const label = mode === 'arr' ? `framme senast ${dayLabel(target)}${hm(target)}` : `avgång från ${dayLabel(target)}${hm(target)}`;
+  const label = s.mode === 'arr' ? `framme senast ${dayLabel(s.target)}${hm(s.target)}` : `avgång från ${dayLabel(s.target)}${hm(s.target)}`;
+  const note = s.rtNote ? ` · <span class="error">${esc(s.rtNote)}</span>` : '';
   out.innerHTML = `
-    <p class="summary">${esc(s.from.label)} → ${esc(s.to.label)} · ${label}</p>
+    <p class="summary">${esc(s.from.label)} → ${esc(s.to.label)} · ${label}${note}</p>
     <div class="trips" id="trips"></div>
     <p class="status" id="sentinel"></p>`;
-  appendTrips(s);
+  appendGroups(s, s.groups);
 }
 
-// Adds trips not yet on screen. Only ones departing after the last shown
-// trip are appended, so the list stays in departure order while scrolling.
-function appendTrips(s) {
+function appendGroups(s, groups) {
   const list = $('trips');
-  const last = Math.max(-Infinity, ...[...s.shown].map((k) => s.all.get(k).dep));
-  const fresh = visibleTrips(s).filter((t) => !s.shown.has(t.key) && t.dep >= last);
-  fresh.forEach((t) => s.shown.add(t.key));
-  list.insertAdjacentHTML('beforeend', fresh.map((t) => tripHtml(t, s.target)).join(''));
-  list.querySelectorAll('.trip').forEach(bindTrip);
-
+  const offset = list.children.length;
+  list.insertAdjacentHTML('beforeend', groups.map((g, i) => groupHtml(s, g, offset + i)).join(''));
   const sentinel = $('sentinel');
   sentinel.textContent = s.done ? (s.mode === 'dep' ? 'Inga fler avgångar hittades.' : '') : '';
   // Re-observing makes the observer re-check, so a short list keeps filling the screen.
@@ -489,11 +485,14 @@ function appendTrips(s) {
 const scrollObserver = new IntersectionObserver((entries) => {
   if (entries.some((e) => e.isIntersecting)) loadMore();
 }, { rootMargin: '400px 0px' });
-function bindTrip(el) {
-  if (el.dataset.bound) return;
-  el.dataset.bound = '1';
-  el.addEventListener('click', () => el.classList.toggle('open'));
-}
+
+$('out').addEventListener('click', (e) => {
+  const opt = e.target.closest('.opt');
+  if (!opt) return;
+  const open = opt.getAttribute('aria-expanded') !== 'true';
+  opt.setAttribute('aria-expanded', String(open));
+  $(`d-${opt.dataset.g}-${opt.dataset.o}`).classList.toggle('open', open);
+});
 
 // ---------- autocomplete ----------
 
@@ -565,7 +564,8 @@ function saveRecent(from, to) {
   renderRecent();
 }
 function renderRecent() {
-  const list = loadRecent().filter((r) => !r.from.coord);
+  // "Min position" is only valid where it was saved.
+  const list = loadRecent().filter((r) => r.from.label !== 'Min position' && r.to.label !== 'Min position');
   const box = $('recent');
   box.innerHTML = list.map((r, i) => `<button type="button" data-i="${i}">${esc(r.from.label)} → ${esc(r.to.label)}</button>`).join('');
   box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
@@ -610,6 +610,10 @@ $('form').addEventListener('submit', (e) => { e.preventDefault(); search(); });
 setupAutocomplete($('from'), 'from');
 setupAutocomplete($('to'), 'to');
 renderRecent();
+
+fetch('data/index.json').then((r) => r.json()).then((ix) => {
+  $('feed').textContent = `Tidtabell ${ix.feedVersion || ''}, uppdaterad ${inputValue(Date.parse(ix.built)).replace('T', ' ')}`;
+}).catch(() => {});
 </script>
 </body>
 </html>

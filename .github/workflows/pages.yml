@@ -1,0 +1,62 @@
+# Builds the per-day timetable files from SL's GTFS feed and publishes the
+# app to GitHub Pages. Runs nightly (new timetable) and on every push to main.
+name: Build timetable and deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 3 * * *' # ~04:23/05:23 Stockholm, after Samtrafiken publishes the feed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - id: day
+        run: echo "ymd=$(TZ=Europe/Stockholm date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      # The static feed has a small monthly download quota: fetch it at most once a day.
+      - id: cache
+        uses: actions/cache@v6
+        with:
+          path: gtfs/sl.zip
+          key: gtfs-sl-${{ steps.day.outputs.ymd }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          KEY: ${{ secrets.GTFS_STATIC_KEY }}
+        run: |
+          mkdir -p gtfs
+          curl -fsS --compressed -H 'Accept-Encoding: gzip' -o gtfs/sl.zip \
+            "https://opendata.samtrafiken.se/gtfs/sl/sl.zip?key=$KEY"
+
+      - run: unzip -oq gtfs/sl.zip -d gtfs -x shapes.txt
+      - run: node tools/build-data.mjs gtfs _site/data 8
+      - run: cp index.html router.js realtime.js manifest.webmanifest icon.svg icon-180.png icon-512.png _site/
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
