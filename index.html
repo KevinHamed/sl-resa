@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SL Resa</title>
+<meta name="theme-color" content="#0b5fa5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="SL Resa">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #f2f4f7;
+    --card: #ffffff;
+    --text: #15191e;
+    --muted: #66707c;
+    --line: #dde2e8;
+    --accent: #0b5fa5;
+    --accent-text: #ffffff;
+    --good: #12805c;
+    --late: #c4320a;
+    --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116;
+      --card: #181c23;
+      --text: #e8ebef;
+      --muted: #9aa4b0;
+      --line: #2a303a;
+      --accent: #4a9be0;
+      --accent-text: #0e1116;
+      --good: #3fc08e;
+      --late: #ff7a52;
+      --chip: #222833;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color: transparent;
+  }
+  main { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 16px 0 12px; }
+  button, input { font: inherit; color: inherit; }
+
+  .card { background: var(--card); border-radius: 14px; padding: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+  .places { position: relative; display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+  .fields { display: grid; gap: 8px; }
+  .field { position: relative; }
+  .field label { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 13px; pointer-events: none; width: 40px; }
+  .field input {
+    width: 100%; padding: 12px 40px 12px 52px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg); font-size: 17px; /* >=16px stops iOS zooming on focus */
+  }
+  .field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .field .icon-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); }
+  .icon-btn { border: 0; background: transparent; width: 36px; height: 36px; border-radius: 8px; color: var(--muted); font-size: 18px; cursor: pointer; }
+  .icon-btn:active { background: var(--chip); }
+  .swap { font-size: 22px; }
+
+  .suggest { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 10; background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin: 0; padding: 4px 0; list-style: none; box-shadow: 0 8px 24px rgba(0,0,0,.15); max-height: 320px; overflow-y: auto; }
+  .suggest li { padding: 10px 12px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+  .suggest li:active, .suggest li.hi { background: var(--chip); }
+  .suggest .kind { font-size: 12px; color: var(--muted); flex: none; width: 48px; }
+  .suggest .sub { color: var(--muted); font-size: 13px; }
+
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--chip); border-radius: 10px; padding: 3px; margin-top: 12px; }
+  .seg button { border: 0; background: transparent; padding: 8px 4px; border-radius: 8px; font-size: 15px; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--card); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+  .when { margin-top: 8px; }
+  .when input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); font-size: 17px; min-height: 44px; }
+  .search { width: 100%; margin-top: 12px; padding: 13px; border: 0; border-radius: 10px; background: var(--accent); color: var(--accent-text); font-weight: 600; font-size: 17px; cursor: pointer; }
+  .search:disabled { opacity: .6; }
+
+  .recent { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .recent button { border: 0; background: var(--card); border-radius: 999px; padding: 6px 12px; font-size: 13px; color: var(--muted); cursor: pointer; }
+
+  .status { color: var(--muted); text-align: center; padding: 20px 8px; }
+  .error { color: var(--late); }
+  .summary { color: var(--muted); font-size: 13px; margin: 16px 4px 8px; }
+
+  .trips { display: grid; gap: 8px; }
+  .trip { background: var(--card); border-radius: 14px; padding: 12px; cursor: pointer; }
+  .trip .top { display: flex; align-items: baseline; gap: 8px; }
+  .trip .times { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .trip .dur { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .trip .meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .badge { font-size: 11px; font-weight: 700; color: var(--good); border: 1px solid currentColor; border-radius: 6px; padding: 1px 6px; text-transform: uppercase; letter-spacing: .03em; }
+  .legs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 8px; }
+  .line { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 6px; color: #fff; font-size: 13px; font-weight: 700; }
+  .walk { color: var(--muted); font-size: 13px; }
+  .arrow { color: var(--muted); font-size: 12px; }
+  .rt-late { color: var(--late); }
+  .old { text-decoration: line-through; color: var(--muted); font-weight: 400; font-size: .8em; }
+
+  .detail { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; display: none; }
+  .trip.open .detail { display: block; }
+  .step { display: grid; grid-template-columns: 52px 1fr; gap: 8px; padding: 6px 0; font-size: 14px; }
+  .step .t { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .step .what { color: var(--muted); }
+  .step .info { color: var(--late); font-size: 13px; margin-top: 2px; }
+  .more { width: 100%; margin-top: 8px; padding: 10px; border: 0; border-radius: 10px; background: var(--chip); cursor: pointer; font-size: 14px; }
+  .foot { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SL Resa</h1>
+
+  <form class="card" id="form" autocomplete="off">
+    <div class="places">
+      <div class="fields">
+        <div class="field">
+          <label for="from">Från</label>
+          <input id="from" type="search" placeholder="Hållplats eller adress" enterkeyhint="next">
+          <button type="button" class="icon-btn" id="locate" title="Min position" aria-label="Använd min position">◎</button>
+        </div>
+        <div class="field">
+          <label for="to">Till</label>
+          <input id="to" type="search" placeholder="Hållplats eller adress" enterkeyhint="search">
+        </div>
+      </div>
+      <button type="button" class="icon-btn swap" id="swap" title="Byt riktning" aria-label="Byt riktning">⇅</button>
+    </div>
+
+    <div class="seg" role="group" aria-label="Tid">
+      <button type="button" data-mode="now" aria-pressed="true">Nu</button>
+      <button type="button" data-mode="dep" aria-pressed="false">Avgå</button>
+      <button type="button" data-mode="arr" aria-pressed="false">Framme</button>
+    </div>
+    <div class="when" id="when" hidden>
+      <input id="datetime" type="datetime-local" aria-label="Datum och tid">
+    </div>
+
+    <button class="search" id="go" type="submit">Sök resa</button>
+  </form>
+
+  <div class="recent" id="recent"></div>
+  <div id="out"></div>
+  <p class="foot">Data: SL Journey-planner v2 (Trafiklab). Realtid när den finns.</p>
+</main>
+
+<script>
+const API = 'https://journeyplanner.integration.sl.se/v2';
+const TZ = 'Europe/Stockholm';
+const MIN = 60 * 1000;
+// stops + streets + addresses + POIs (bitmask for any_obj_filter_sf)
+const PLACE_FILTER = 2 | 4 | 8 | 32;
+const MAX_PAGES = 4;
+const TARGET_TRIPS = 8;
+
+const $ = (id) => document.getElementById(id);
+const state = { mode: 'now', from: null, to: null };
+
+// ---------- time helpers (all API times are Stockholm local) ----------
+
+const partsFmt = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+function stockholmParts(epoch) {
+  const p = Object.fromEntries(partsFmt.formatToParts(new Date(epoch)).map((x) => [x.type, x.value]));
+  return { y: p.year, mo: p.month, d: p.day, h: p.hour, mi: p.minute };
+}
+function apiDateTime(epoch) {
+  const p = stockholmParts(epoch);
+  return { date: `${p.y}${p.mo}${p.d}`, time: `${p.h}${p.mi}` };
+}
+function inputValue(epoch) {
+  const p = stockholmParts(epoch);
+  return `${p.y}-${p.mo}-${p.d}T${p.h}:${p.mi}`;
+}
+// "YYYY-MM-DDTHH:MM" in Stockholm time -> epoch ms
+function fromInputValue(v) {
+  const [date, time] = v.split('T');
+  const [y, mo, d] = date.split('-').map(Number);
+  const [h, mi] = time.split(':').map(Number);
+  const naive = Date.UTC(y, mo - 1, d, h, mi);
+  const p = stockholmParts(naive);
+  const offset = Date.UTC(+p.y, +p.mo - 1, +p.d, +p.h, +p.mi) - naive;
+  return naive - offset;
+}
+const hm = (epoch) => { const p = stockholmParts(epoch); return `${p.h}:${p.mi}`; };
+function fmtDur(ms) {
+  const m = Math.round(ms / MIN);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
+}
+// Weekday + date prefix, omitted when epoch falls on the same day as `ref`.
+function dayLabel(epoch, ref = Date.now()) {
+  const today = stockholmParts(ref);
+  const p = stockholmParts(epoch);
+  if (p.y === today.y && p.mo === today.mo && p.d === today.d) return '';
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' }).format(epoch) + ' ';
+}
+
+// ---------- API ----------
+
+async function getJSON(path, params) {
+  const url = `${API}/${path}?${new URLSearchParams(params)}`;
+  const res = await fetch(url);
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error_message || `HTTP ${res.status}`);
+  return body;
+}
+
+async function findPlaces(text) {
+  const data = await getJSON('stop-finder', { name_sf: text, any_obj_filter_sf: PLACE_FILTER, type_sf: 'any' });
+  return (data.locations || [])
+    .sort((a, b) => (b.matchQuality || 0) - (a.matchQuality || 0))
+    .map((l) => ({ id: l.id, name: l.disassembledName && l.type === 'stop' ? l.disassembledName : l.name, full: l.name, type: l.type }));
+}
+
+function placeParams(prefix, place) {
+  if (place.coord) {
+    return { [`type_${prefix}`]: 'coord', [`name_${prefix}`]: `${place.coord[1].toFixed(6)}:${place.coord[0].toFixed(6)}:WGS84[dd.ddddd]` };
+  }
+  return { [`type_${prefix}`]: 'any', [`name_${prefix}`]: place.id };
+}
+
+async function fetchTrips(from, to, epoch, mode) {
+  const { date, time } = apiDateTime(epoch);
+  const data = await getJSON('trips', {
+    ...placeParams('origin', from), ...placeParams('destination', to),
+    itd_date: date, itd_time: time, itd_trip_date_time_dep_arr: mode,
+    calc_number_of_trips: 3, // API maximum
+  });
+  return (data.journeys || []).map(normalizeTrip).filter(Boolean);
+}
+
+// ---------- trip normalisation ----------
+
+const WALK_CLASSES = new Set([99, 100]); // 99 = transfer footpath, 100 = walk
+function legTime(point, kind) {
+  const est = point[`${kind}TimeEstimated`], plan = point[`${kind}TimePlanned`];
+  return { at: Date.parse(est || plan), planned: Date.parse(plan) };
+}
+function placeName(p) {
+  if (p.type === 'platform' && p.parent?.disassembledName) return p.parent.disassembledName;
+  if (p.type === 'stop' && p.disassembledName) return p.disassembledName;
+  return p.name;
+}
+function normalizeTrip(j) {
+  if (!j.legs?.length) return null;
+  const legs = j.legs.map((l) => {
+    const t = l.transportation || {};
+    const dep = legTime(l.origin, 'departure');
+    const arr = legTime(l.destination, 'arrival');
+    const cls = t.product?.class;
+    return {
+      dep, arr, cls,
+      walk: WALK_CLASSES.has(cls),
+      transfer: cls === 99,
+      product: t.product?.name || '',
+      line: t.disassembledName || t.number || '',
+      towards: t.destination?.name || '',
+      from: placeName(l.origin),
+      to: placeName(l.destination),
+      platform: l.origin.properties?.platformName || '',
+      distance: l.distance,
+      cancelled: Boolean(l.isCancelled || l.realtimeStatus?.includes?.('TRIP_CANCELLED')),
+      infos: (l.infos || [])
+        .filter((i) => i.priority && i.priority !== 'veryLow' && i.priority !== 'low')
+        .flatMap((i) => (i.infoLinks || []).map((x) => x.title || x.subtitle).filter(Boolean)),
+    };
+  });
+  const dep = legs[0].dep.at, arr = legs[legs.length - 1].arr.at;
+  const rides = legs.filter((l) => !l.walk);
+  const key = legs.map((l) => `${l.line}|${l.dep.planned}|${l.arr.planned}`).join('/');
+  return { legs, rides, dep, arr, dur: arr - dep, key, cancelled: legs.some((l) => l.cancelled), changes: Math.max(0, rides.length - 1) };
+}
+
+// Drop trips that another trip beats on both ends: leaves no earlier
+// and arrives no later. What remains are the time-efficient options.
+function paretoFilter(trips) {
+  return trips.filter((a) => !trips.some((b) => b !== a &&
+    b.dep >= a.dep && b.arr <= a.arr && (b.dep > a.dep || b.arr < a.arr ||
+    (b.changes < a.changes) || (b.changes === a.changes && b.key < a.key))));
+}
+
+// ---------- search ----------
+
+async function resolvePlace(input, current) {
+  const text = input.value.trim();
+  if (current && current.label === text) return current;
+  if (!text) return null;
+  const [best] = await findPlaces(text);
+  if (!best) throw new Error(`Hittade ingen plats för "${text}"`);
+  input.value = best.name;
+  return { ...best, label: best.name };
+}
+
+async function search() {
+  const out = $('out');
+  const go = $('go');
+  go.disabled = true;
+  out.innerHTML = '<p class="status">Söker…</p>';
+  try {
+    state.from = await resolvePlace($('from'), state.from);
+    state.to = await resolvePlace($('to'), state.to);
+    if (!state.from || !state.to) throw new Error('Fyll i både från och till.');
+
+    const mode = state.mode === 'arr' ? 'arr' : 'dep';
+    const target = state.mode === 'now' ? Date.now() : fromInputValue($('datetime').value);
+    const all = new Map();
+    let cursor = target;
+
+    // The API returns at most 3 trips per call, so page forward (or
+    // backward for "arrive by") until there are enough to compare.
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const batch = await fetchTrips(state.from, state.to, cursor, mode);
+      batch.forEach((t) => all.set(t.key, t));
+      const usable = [...all.values()].filter((t) => fits(t, mode, target));
+      if (!batch.length || usable.length >= TARGET_TRIPS) break;
+      const next = mode === 'dep'
+        ? Math.max(...batch.map((t) => t.dep)) + MIN
+        : Math.min(...batch.map((t) => t.arr)) - MIN;
+      if (mode === 'dep' ? next <= cursor : next >= cursor) break;
+      cursor = next;
+    }
+
+    const trips = paretoFilter([...all.values()].filter((t) => fits(t, mode, target) && !t.cancelled))
+      .sort((a, b) => a.dep - b.dep || a.arr - b.arr);
+    render(trips, mode, target);
+    saveRecent(state.from, state.to);
+  } catch (err) {
+    out.innerHTML = `<p class="status error">${esc(err.message || 'Något gick fel')}</p>`;
+  } finally {
+    go.disabled = false;
+  }
+}
+
+function fits(t, mode, target) {
+  // Small grace for "depart": the planner may start the first walk a little early.
+  return mode === 'dep' ? t.dep >= target - MIN : t.arr <= target;
+}
+
+// ---------- rendering ----------
+
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function lineColor(leg) {
+  const n = parseInt(leg.line, 10);
+  switch (leg.cls) {
+    case 2: // tunnelbana
+      if ([10, 11].includes(n)) return '#0089ca';
+      if ([13, 14].includes(n)) return '#d71d24';
+      return '#179c4b';
+    case 0: case 1: return '#ec619f'; // pendeltåg / tåg
+    case 4: // spårväg & lokalbanor
+      if ([25, 26].includes(n)) return '#21b6ba';
+      if ([27, 28, 29].includes(n)) return '#a86dae';
+      if ([30, 31].includes(n)) return '#d77d00';
+      if (n === 21) return '#b65f1f';
+      return '#778da7';
+    case 5: case 7: // buss
+      return (n >= 1 && n <= 6) || (n >= 172 && n <= 179) ? '#0089ca' : '#d71d24';
+    case 9: return '#00a7b5'; // båt
+    default: return '#5b6570';
+  }
+}
+const icon = (cls) => ({ 0: '🚆', 1: '🚆', 2: 'T', 4: '🚊', 5: '🚌', 7: '🚌', 9: '⛴' }[cls] || '•');
+
+function timeHtml(t) {
+  const late = Math.round((t.at - t.planned) / MIN);
+  if (Math.abs(late) < 1) return hm(t.at);
+  return `<span class="rt-late">${hm(t.at)}</span> <span class="old">${hm(t.planned)}</span>`;
+}
+
+function chipsHtml(trip) {
+  const parts = [];
+  trip.legs.forEach((l, i) => {
+    if (l.walk) {
+      const mins = Math.round((l.arr.at - l.dep.at) / MIN);
+      if (!l.transfer && mins > 0) parts.push(`<span class="walk">🚶${mins}</span>`);
+      return;
+    }
+    parts.push(`<span class="line" style="background:${lineColor(l)}">${icon(l.cls)} ${esc(l.line)}</span>`);
+  });
+  return parts.join('<span class="arrow">›</span>');
+}
+
+function detailHtml(trip) {
+  return trip.legs.map((l) => {
+    const mins = Math.max(1, Math.round((l.arr.at - l.dep.at) / MIN));
+    if (l.walk) {
+      if (l.transfer) return `<div class="step"><div class="t"></div><div class="what">Byte i ${esc(l.from)} · ${mins} min</div></div>`;
+      const dist = l.distance ? ` (${l.distance} m)` : '';
+      return `<div class="step"><div class="t">${hm(l.dep.at)}</div><div><b>Gå</b> till ${esc(l.to)} <span class="what">· ${mins} min${dist}</span></div></div>`;
+    }
+    const plat = l.platform ? ` · läge ${esc(l.platform)}` : '';
+    const infos = l.infos.map((x) => `<div class="info">⚠ ${esc(x)}</div>`).join('');
+    return `<div class="step"><div class="t">${timeHtml(l.dep)}</div><div>
+        <b>${esc(l.product)} ${esc(l.line)}</b> mot ${esc(l.towards)}
+        <div class="what">${esc(l.from)}${plat} → ${esc(l.to)} (${timeHtml(l.arr)}) · ${mins} min</div>${infos}
+      </div></div>`;
+  }).join('');
+}
+
+function tripHtml(trip, fastest, showBadge, target) {
+  const firstRide = trip.rides[0];
+  const board = firstRide ? `${firstRide.product} ${firstRide.line} från ${firstRide.from} ${hm(firstRide.dep.at)}` : 'Gå hela vägen';
+  const changes = trip.changes === 0 ? 'Inga byten' : trip.changes === 1 ? '1 byte' : `${trip.changes} byten`;
+  const badge = showBadge && trip.dur === fastest ? '<span class="badge">Snabbast</span>' : '';
+  const warn = trip.legs.some((l) => l.infos.length) ? ' · ⚠ störning' : '';
+  return `<article class="trip">
+    <div class="top">
+      <span class="times">${dayLabel(trip.dep, target)}${timeHtml(trip.legs[0].dep)} – ${timeHtml(trip.legs[trip.legs.length - 1].arr)}</span>
+      ${badge}<span class="dur">${fmtDur(trip.dur)}</span>
+    </div>
+    <div class="meta">${esc(board)} · ${changes}${warn}</div>
+    <div class="legs">${chipsHtml(trip)}</div>
+    <div class="detail">${detailHtml(trip)}</div>
+  </article>`;
+}
+
+function render(trips, mode, target) {
+  const out = $('out');
+  if (!trips.length) {
+    out.innerHTML = '<p class="status">Inga resor hittades för den tiden.</p>';
+    return;
+  }
+  const fastest = Math.min(...trips.map((t) => t.dur));
+  // Keep the list to trips close to the fastest; slower ones are one tap away.
+  const slack = Math.max(10 * MIN, fastest * 0.3);
+  const quick = trips.filter((t) => t.dur <= fastest + slack);
+  const slow = trips.filter((t) => t.dur > fastest + slack);
+
+  // A "fastest" badge only means something when not every trip ties.
+  const showBadge = trips.some((t) => t.dur !== fastest);
+  const card = (t) => tripHtml(t, fastest, showBadge, target);
+
+  const label = mode === 'arr' ? `framme senast ${dayLabel(target)}${hm(target)}` : `avgång från ${dayLabel(target)}${hm(target)}`;
+  out.innerHTML = `
+    <p class="summary">${esc(state.from.label)} → ${esc(state.to.label)} · ${label}</p>
+    <div class="trips" id="trips">${quick.map(card).join('')}</div>
+    ${slow.length ? `<button class="more" id="more">Visa ${slow.length} långsammare</button>` : ''}`;
+  $('more')?.addEventListener('click', (e) => {
+    $('trips').insertAdjacentHTML('beforeend', slow.map(card).join(''));
+    $('trips').querySelectorAll('.trip').forEach(bindTrip);
+    e.target.remove();
+  });
+  out.querySelectorAll('.trip').forEach(bindTrip);
+}
+function bindTrip(el) {
+  if (el.dataset.bound) return;
+  el.dataset.bound = '1';
+  el.addEventListener('click', () => el.classList.toggle('open'));
+}
+
+// ---------- autocomplete ----------
+
+function setupAutocomplete(input, key) {
+  const field = input.parentElement;
+  let list = null, timer = null, seq = 0, items = [], hi = -1;
+
+  const close = () => { list?.remove(); list = null; items = []; hi = -1; };
+  const pick = (p) => {
+    state[key] = { ...p, label: p.name };
+    input.value = p.name;
+    close();
+    if (key === 'from' && !$('to').value) $('to').focus(); else input.blur();
+  };
+  const show = (places) => {
+    close();
+    if (!places.length || document.activeElement !== input) return;
+    items = places.slice(0, 8);
+    list = document.createElement('ul');
+    list.className = 'suggest';
+    list.innerHTML = items.map((p) => {
+      const kind = { stop: 'Hållpl.', poi: 'Plats', singlehouse: 'Adress', street: 'Gata' }[p.type] || '';
+      const sub = p.full !== p.name ? `<span class="sub">${esc(p.full.split(',')[0])}</span>` : '';
+      return `<li><span class="kind">${kind}</span><span>${esc(p.name)} ${sub}</span></li>`;
+    }).join('');
+    // pointerdown fires before the input's blur, so the tap isn't lost
+    list.querySelectorAll('li').forEach((li, i) => li.addEventListener('pointerdown', (e) => { e.preventDefault(); pick(items[i]); }));
+    field.appendChild(list);
+  };
+
+  input.addEventListener('input', () => {
+    state[key] = null;
+    clearTimeout(timer);
+    const text = input.value.trim();
+    if (text.length < 2) return close();
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      try {
+        const places = await findPlaces(text);
+        if (mine === seq) show(places);
+      } catch { /* ignore autocomplete errors; search will report */ }
+    }, 180);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (!list) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      hi = (hi + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      list.querySelectorAll('li').forEach((li, i) => li.classList.toggle('hi', i === hi));
+    } else if (e.key === 'Enter' && hi >= 0) {
+      e.preventDefault();
+      pick(items[hi]);
+    } else if (e.key === 'Escape') close();
+  });
+  input.addEventListener('blur', () => setTimeout(close, 100));
+}
+
+// ---------- recent searches (per-device convenience) ----------
+
+const RECENT_KEY = 'sl-resa-recent';
+function loadRecent() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY)) || []; } catch { return []; }
+}
+function saveRecent(from, to) {
+  const strip = ({ id, name, full, type, coord, label }) => ({ id, name, full, type, coord, label });
+  const list = loadRecent().filter((r) => !(r.from.label === from.label && r.to.label === to.label));
+  list.unshift({ from: strip(from), to: strip(to) });
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 5))); } catch { /* private mode */ }
+  renderRecent();
+}
+function renderRecent() {
+  const list = loadRecent().filter((r) => !r.from.coord);
+  const box = $('recent');
+  box.innerHTML = list.map((r, i) => `<button type="button" data-i="${i}">${esc(r.from.label)} → ${esc(r.to.label)}</button>`).join('');
+  box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+    const r = list[b.dataset.i];
+    state.from = r.from; state.to = r.to;
+    $('from').value = r.from.label; $('to').value = r.to.label;
+    search();
+  }));
+}
+
+// ---------- wiring ----------
+
+document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
+  state.mode = b.dataset.mode;
+  document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  $('when').hidden = state.mode === 'now';
+  if (state.mode !== 'now' && !$('datetime').value) $('datetime').value = inputValue(Date.now());
+}));
+
+$('swap').addEventListener('click', () => {
+  [state.from, state.to] = [state.to, state.from];
+  [$('from').value, $('to').value] = [$('to').value, $('from').value];
+});
+
+$('locate').addEventListener('click', () => {
+  if (!navigator.geolocation) return alert('Platstjänster stöds inte här.');
+  $('from').value = 'Hämtar position…';
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      state.from = { coord: [pos.coords.latitude, pos.coords.longitude], name: 'Min position', label: 'Min position' };
+      $('from').value = 'Min position';
+    },
+    () => {
+      $('from').value = '';
+      alert('Kunde inte hämta position. (Kräver https och att Safari får använda platstjänster.)');
+    },
+    { enableHighAccuracy: true, timeout: 10000 },
+  );
+});
+
+$('form').addEventListener('submit', (e) => { e.preventDefault(); search(); });
+setupAutocomplete($('from'), 'from');
+setupAutocomplete($('to'), 'to');
+renderRecent();
+</script>
+</body>
+</html>
