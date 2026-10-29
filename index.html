@@ -94,7 +94,6 @@
   .trip .times { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .trip .dur { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
   .trip .meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
-  .badge { font-size: 11px; font-weight: 700; color: var(--good); border: 1px solid currentColor; border-radius: 6px; padding: 1px 6px; text-transform: uppercase; letter-spacing: .03em; }
   .legs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 8px; }
   .line { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 6px; color: #fff; font-size: 13px; font-weight: 700; }
   .walk { color: var(--muted); font-size: 13px; }
@@ -108,7 +107,6 @@
   .step .t { font-variant-numeric: tabular-nums; font-weight: 600; }
   .step .what { color: var(--muted); }
   .step .info { color: var(--late); font-size: 13px; margin-top: 2px; }
-  .more { width: 100%; margin-top: 8px; padding: 10px; border: 0; border-radius: 10px; background: var(--chip); cursor: pointer; font-size: 14px; }
   .foot { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
 </style>
 </head>
@@ -298,10 +296,43 @@ async function resolvePlace(input, current) {
   return { ...best, label: best.name };
 }
 
+// The current result list; scrolling to its end loads later departures.
+let session = null;
+
+// The API returns at most 3 trips per call, so page forward (or backward
+// for "arrive by") until `wanted` new usable trips have arrived.
+async function loadPages(s, wanted) {
+  let added = 0;
+  for (let page = 0; page < MAX_PAGES && added < wanted; page++) {
+    const batch = await fetchTrips(s.from, s.to, s.cursor, s.mode);
+    let fresh = 0;
+    batch.forEach((t) => {
+      if (s.all.has(t.key)) return;
+      s.all.set(t.key, t);
+      fresh++;
+      if (fits(t, s.mode, s.target)) added++;
+    });
+    const next = s.mode === 'dep'
+      ? Math.max(...batch.map((t) => t.dep)) + MIN
+      : Math.min(...batch.map((t) => t.arr)) - MIN;
+    if (!fresh || (s.mode === 'dep' ? next <= s.cursor : next >= s.cursor)) {
+      s.done = true;
+      break;
+    }
+    s.cursor = next;
+  }
+}
+
+function visibleTrips(s) {
+  return paretoFilter([...s.all.values()].filter((t) => fits(t, s.mode, s.target) && !t.cancelled))
+    .sort((a, b) => a.dep - b.dep || a.arr - b.arr);
+}
+
 async function search() {
   const out = $('out');
   const go = $('go');
   go.disabled = true;
+  session = null;
   out.innerHTML = '<p class="status">Söker…</p>';
   try {
     state.from = await resolvePlace($('from'), state.from);
@@ -310,32 +341,33 @@ async function search() {
 
     const mode = state.mode === 'arr' ? 'arr' : 'dep';
     const target = state.mode === 'now' ? Date.now() : fromInputValue($('datetime').value);
-    const all = new Map();
-    let cursor = target;
-
-    // The API returns at most 3 trips per call, so page forward (or
-    // backward for "arrive by") until there are enough to compare.
-    for (let page = 0; page < MAX_PAGES; page++) {
-      const batch = await fetchTrips(state.from, state.to, cursor, mode);
-      batch.forEach((t) => all.set(t.key, t));
-      const usable = [...all.values()].filter((t) => fits(t, mode, target));
-      if (!batch.length || usable.length >= TARGET_TRIPS) break;
-      const next = mode === 'dep'
-        ? Math.max(...batch.map((t) => t.dep)) + MIN
-        : Math.min(...batch.map((t) => t.arr)) - MIN;
-      if (mode === 'dep' ? next <= cursor : next >= cursor) break;
-      cursor = next;
-    }
-
-    const trips = paretoFilter([...all.values()].filter((t) => fits(t, mode, target) && !t.cancelled))
-      .sort((a, b) => a.dep - b.dep || a.arr - b.arr);
-    render(trips, mode, target);
+    const s = { from: state.from, to: state.to, mode, target, cursor: target, all: new Map(), shown: new Set(), done: false, loading: false };
+    await loadPages(s, TARGET_TRIPS);
+    // "Arrive by" has a hard end, so only departure searches keep loading.
+    if (mode === 'arr') s.done = true;
+    session = s;
+    render(s);
     saveRecent(state.from, state.to);
   } catch (err) {
     out.innerHTML = `<p class="status error">${esc(err.message || 'Något gick fel')}</p>`;
   } finally {
     go.disabled = false;
   }
+}
+
+async function loadMore() {
+  const s = session;
+  if (!s || s.done || s.loading) return;
+  s.loading = true;
+  $('sentinel').textContent = 'Hämtar senare avgångar…';
+  try {
+    await loadPages(s, TARGET_TRIPS);
+  } catch {
+    s.done = true; // stop retrying on errors; a new search starts over
+  }
+  s.loading = false;
+  if (session !== s) return;
+  appendTrips(s);
 }
 
 function fits(t, mode, target) {
@@ -405,16 +437,15 @@ function detailHtml(trip) {
   }).join('');
 }
 
-function tripHtml(trip, fastest, showBadge, target) {
+function tripHtml(trip, target) {
   const firstRide = trip.rides[0];
   const board = firstRide ? `${firstRide.product} ${firstRide.line} från ${firstRide.from} ${hm(firstRide.dep.at)}` : 'Gå hela vägen';
   const changes = trip.changes === 0 ? 'Inga byten' : trip.changes === 1 ? '1 byte' : `${trip.changes} byten`;
-  const badge = showBadge && trip.dur === fastest ? '<span class="badge">Snabbast</span>' : '';
   const warn = trip.legs.some((l) => l.infos.length) ? ' · ⚠ störning' : '';
   return `<article class="trip">
     <div class="top">
       <span class="times">${dayLabel(trip.dep, target)}${timeHtml(trip.legs[0].dep)} – ${timeHtml(trip.legs[trip.legs.length - 1].arr)}</span>
-      ${badge}<span class="dur">${fmtDur(trip.dur)}</span>
+      <span class="dur">${fmtDur(trip.dur)}</span>
     </div>
     <div class="meta">${esc(board)} · ${changes}${warn}</div>
     <div class="legs">${chipsHtml(trip)}</div>
@@ -422,34 +453,42 @@ function tripHtml(trip, fastest, showBadge, target) {
   </article>`;
 }
 
-function render(trips, mode, target) {
+function render(s) {
   const out = $('out');
+  const trips = visibleTrips(s);
   if (!trips.length) {
     out.innerHTML = '<p class="status">Inga resor hittades för den tiden.</p>';
     return;
   }
-  const fastest = Math.min(...trips.map((t) => t.dur));
-  // Keep the list to trips close to the fastest; slower ones are one tap away.
-  const slack = Math.max(10 * MIN, fastest * 0.3);
-  const quick = trips.filter((t) => t.dur <= fastest + slack);
-  const slow = trips.filter((t) => t.dur > fastest + slack);
-
-  // A "fastest" badge only means something when not every trip ties.
-  const showBadge = trips.some((t) => t.dur !== fastest);
-  const card = (t) => tripHtml(t, fastest, showBadge, target);
-
+  const { mode, target } = s;
   const label = mode === 'arr' ? `framme senast ${dayLabel(target)}${hm(target)}` : `avgång från ${dayLabel(target)}${hm(target)}`;
   out.innerHTML = `
-    <p class="summary">${esc(state.from.label)} → ${esc(state.to.label)} · ${label}</p>
-    <div class="trips" id="trips">${quick.map(card).join('')}</div>
-    ${slow.length ? `<button class="more" id="more">Visa ${slow.length} långsammare</button>` : ''}`;
-  $('more')?.addEventListener('click', (e) => {
-    $('trips').insertAdjacentHTML('beforeend', slow.map(card).join(''));
-    $('trips').querySelectorAll('.trip').forEach(bindTrip);
-    e.target.remove();
-  });
-  out.querySelectorAll('.trip').forEach(bindTrip);
+    <p class="summary">${esc(s.from.label)} → ${esc(s.to.label)} · ${label}</p>
+    <div class="trips" id="trips"></div>
+    <p class="status" id="sentinel"></p>`;
+  appendTrips(s);
 }
+
+// Adds trips not yet on screen. Only ones departing after the last shown
+// trip are appended, so the list stays in departure order while scrolling.
+function appendTrips(s) {
+  const list = $('trips');
+  const last = Math.max(-Infinity, ...[...s.shown].map((k) => s.all.get(k).dep));
+  const fresh = visibleTrips(s).filter((t) => !s.shown.has(t.key) && t.dep >= last);
+  fresh.forEach((t) => s.shown.add(t.key));
+  list.insertAdjacentHTML('beforeend', fresh.map((t) => tripHtml(t, s.target)).join(''));
+  list.querySelectorAll('.trip').forEach(bindTrip);
+
+  const sentinel = $('sentinel');
+  sentinel.textContent = s.done ? (s.mode === 'dep' ? 'Inga fler avgångar hittades.' : '') : '';
+  // Re-observing makes the observer re-check, so a short list keeps filling the screen.
+  scrollObserver.unobserve(sentinel);
+  if (!s.done) scrollObserver.observe(sentinel);
+}
+
+const scrollObserver = new IntersectionObserver((entries) => {
+  if (entries.some((e) => e.isIntersecting)) loadMore();
+}, { rootMargin: '400px 0px' });
 function bindTrip(el) {
   if (el.dataset.bound) return;
   el.dataset.bound = '1';
